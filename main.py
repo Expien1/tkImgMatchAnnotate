@@ -13,7 +13,7 @@ class UI:
     def __init__(self, root):
         # 设置窗口
         self.root = root
-        self.root.title("YOLO Image Annotation Tool")
+        self.root.title("Image Annotation Tool")
         self.root.geometry(str(770) + "x" + str(500))
         self.root.minsize(600, 400)
 
@@ -42,7 +42,7 @@ class UI:
         self.next_btn = tk.Button(self.root, text="下一张(d)", command=self.next_img)
         # 创建辅助标注按钮控件
         self.setting_btn = tk.Button(self.root, text="辅助标注设置", command=self.show_setting)
-        self.yolo_btn = tk.Button(self.root, text="加载YOLO模型", command=self.load_yolo)
+        self.match_btn = tk.Button(self.root, text="手动匹配(m)", command=self.manual_match)
         self.auto_btn = tk.Button(self.root, text="开启自动切换", command=self.auto_switch)
         # 创建标签管理控件
         self.classes = ['default']  # 默认类别列表
@@ -54,7 +54,7 @@ class UI:
         # 创建辅助标注模式符号框
         self.mode_var = tk.StringVar(value='手动标注')  # 默认使用'手动标注'
         self.mode_combo = ttk.Combobox(self.root, textvariable=self.mode_var,
-                                       values=['手动标注', '视觉辅助标注', 'yolo辅助标注'],
+                                       values=['手动标注', '视觉辅助标注'],
                                        state='readonly', justify='center',
                                        postcommand=self.canvas.init_template_match)
         self.mode_combo.bind('<<ComboboxSelected>>', self.change_mode)
@@ -83,7 +83,7 @@ class UI:
         self.prev_btn.grid(row=2, column=1, padx=5, pady=5, sticky="nsew")
         self.next_btn.grid(row=3, column=1, padx=5, pady=5, sticky="nsew")
         self.setting_btn.grid(row=6, column=1, padx=5, pady=5, sticky="nsew")
-        self.yolo_btn.grid(row=7, column=1, padx=5, pady=5, sticky="nsew")
+        self.match_btn.grid(row=7, column=1, padx=5, pady=5, sticky="nsew")
         self.auto_btn.grid(row=8, column=1, padx=5, pady=5, sticky="nsew")
         self.label_combo.grid(row=4, column=1, padx=5, pady=5, sticky="nsew")
         self.mode_combo.grid(row=5, column=1, padx=5, pady=5, sticky="nsew")
@@ -139,10 +139,7 @@ class UI:
         if mode == '手动标注':
             pass
         elif mode == '视觉辅助标注':
-            self.canvas.add_next_template()  # 将上一张图片的模板匹配结果进行加载
-            self.root.after(100, self.canvas.match_and_draw)  # 半秒后开始进行模板匹配
-        elif mode == 'YOLO标注':
-            pass
+            pass  # 删除图片后不需要加载模板，直接显示下一张
         # 检测是否需要自动切换
         if self.auto_switch_flag:
             if self.auto_switch_start_index != self.canvas.img_processor.get_img_index():
@@ -161,10 +158,8 @@ class UI:
             pass
         elif mode == '视觉辅助标注':
             if not self.auto_switch_flag:
-                self.canvas.add_next_template()  # 将上一张图片的模板匹配结果进行加载
+                pass  # 模板已在 save_rect() 中加载
             self.root.after(100, self.canvas.match_and_draw)  # 半秒后开始进行模板匹配
-        elif mode == 'YOLO标注':
-            pass
         # 检测是否需要自动切换
         if self.auto_switch_flag:
             if self.auto_switch_start_index != self.canvas.img_processor.get_img_index():
@@ -183,10 +178,8 @@ class UI:
         if mode == '手动标注':
             pass
         elif mode == '视觉辅助标注':
-            self.canvas.add_next_template()  # 将下一张图片的模板匹配结果进行加载
+            pass  # 模板已在 save_rect() 中加载
             self.root.after(100, self.canvas.match_and_draw)  # 半秒后开始进行模板匹配
-        elif mode == 'YOLO标注':
-            pass
         # 检测是否需要自动切换
         if self.auto_switch_flag:
             if self.auto_switch_start_index != self.canvas.img_processor.get_img_index():
@@ -207,16 +200,14 @@ class UI:
             self.status_bar.txshow("已开启视觉辅助标注,点击下一张会自动匹配,键盘切换不会匹配,匹配错误较大的删除后可以提示匹配效果")
             # 初始化模板匹配,加载已有的模板
             self.canvas.init_template_match()
-        elif mode == 'YOLO标注':
-            self.status_bar.txshow("暂时没有该功能")
 
     def show_setting(self):
         """显示辅助标注设置窗口按钮回调函数"""
         self.canvas.create_setting_popup()
 
-    def load_yolo(self):
-        """加载YOLO模型按钮回调函数"""
-        pass
+    def manual_match(self):
+        """手动触发视觉匹配按钮回调函数"""
+        self.canvas.match_and_draw()
 
     def auto_switch(self):
         """自动切换按钮回调函数"""
@@ -261,6 +252,8 @@ class UI:
             self.canvas.prev_img()
         if event.keysym == 'q':  # 删除图片
             self.canvas.del_img()
+        if event.keysym == 'm':  # 手动匹配
+            self.manual_match()
 
         if event.keysym.isdigit():  # 数字按键
             # 数字按键设置类别

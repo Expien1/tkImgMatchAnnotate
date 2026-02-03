@@ -1,6 +1,7 @@
 # -*- coding:utf-8 -*-
 
 import os
+import threading
 import time
 from itertools import cycle
 import tkinter as tk
@@ -165,6 +166,23 @@ class Painter(tk.Canvas):
         # 创建设置弹窗
         self.setting_popup = None
 
+        # 匹配线程控制
+        self.match_event = threading.Event()
+        self.match_thread = None
+        self.match_status = "空闲"
+        # 模板加载标志：避免重复加载
+        self.templates_loaded = False
+
+    def update_match_status(self, status, restore_default=False):
+        """更新匹配状态并在状态栏显示"""
+        self.match_status = status
+        if restore_default:
+            # 恢复默认状态栏文字
+            self.status_bar.txshow(self.status_bar.default_text)
+        else:
+            # 显示匹配状态，不修改默认文本
+            self.status_bar.str_var.set(f"匹配状态: {status}")
+
     def update_classes_colors(self):
         """更新类别颜色列表"""
         # 更新类别对应的颜色
@@ -206,6 +224,8 @@ class Painter(tk.Canvas):
 
     def load_imgs(self, folder_path):
         """加载图片路径,并显示第一张图片"""
+        # 重置模板加载标志，允许重新加载模板
+        self.templates_loaded = False
         try:  # 检测图片路径是否加载成功
             if self.img_processor.load_img_paths(folder_path):  # 将所有图片路径加载到图像处理对象中
                 self.status_bar.txshow(f"成功加载文件夹中的图片{folder_path}", 3)
@@ -434,6 +454,8 @@ class Painter(tk.Canvas):
                 try:  # 捕获写入标签文件异常
                     # 将当前矩形框的标签信息写入yolo标签文件
                     self.label_processor.save_label_file(self.drawing_rect_id, img_width, img_height)
+                    # 手动标注后立即加载当前图片为模板
+                    self.template_manager.load_template(self.img_processor.get_img_path())
                 except PermissionError:
                     label_file_path = self.label_processor.label_file_path
                     print(f"Error: {label_file_path} could not be written. Permission denied.")
@@ -740,19 +762,16 @@ class Painter(tk.Canvas):
     """自动模板匹配相关方法"""
 
     def init_template_match(self):
-        """初始化自动模板匹配,加载已有模板"""
+        """初始化自动模板匹配,加载已有模板（只加载一次）"""
+        if self.templates_loaded:
+            return  # 已加载过，跳过
         self.template_manager.load_all_templates()
+        self.templates_loaded = True  # 标记已加载
 
     def add_last_template(self, img_path):
         """加载上一张图片的标签作为模板"""
         img_path = self.img_processor.get_last_img_path()
         if img_path:  # 如果成功获取到上一张图片的路径就加载其模板,否则不加载
-            self.template_manager.load_template(img_path)
-
-    def add_next_template(self):
-        """加载下一张图片的标签作为模板"""
-        img_path = self.img_processor.get_next_img_path()
-        if img_path:  # 如果成功获取到下一张图片的路径就加载其模板,否则不加载
             self.template_manager.load_template(img_path)
 
     def check_template(self, rect_id):
@@ -765,23 +784,56 @@ class Painter(tk.Canvas):
             self.template_manager.delete_last_template(label_id)  # 删除该模板
 
     def match_and_draw(self):
-        """开始自动匹配模板并重绘矩形框"""
-        # 获取匹配结果
-        rect_ls = self.template_manager.match_all_classes()
-        # 遍历所有匹配结果
+        """开始自动匹配模板并重绘矩形框（使用线程避免阻塞UI）"""
+        # 取消之前的匹配任务
+        self.match_event.set()
+        if self.match_thread and self.match_thread.is_alive():
+            self.match_thread.join(timeout=1.0)  # 等待旧线程结束
+        # 重置Event准备新任务
+        self.match_event.clear()
+        # 开启新线程执行匹配
+        self.update_match_status("匹配中...")
+        self.match_thread = threading.Thread(target=self._match_worker, daemon=True)
+        self.match_thread.start()
+
+    def _match_worker(self):
+        """匹配工作线程"""
+        rect_ls = self.template_manager.match_all_classes(match_event=self.match_event)
+        # 如果被取消，恢复默认状态并返回
+        if self.match_event.is_set():
+            self.after(0, self.update_match_status, "空闲", True)
+            return
+        if rect_ls is None:
+            return
+        # 无模板/无匹配结果时提示用户
+        if len(rect_ls) == 0:
+            self.update_match_status("请先手动标注", restore_default=True)
+            return
+        # 在UI线程中绘制结果
+        self.after(0, self._draw_match_results, rect_ls)
+
+    def _draw_match_results(self, rect_ls):
+        """在UI线程中绘制匹配结果"""
+        # 再次检查是否被取消
+        if self.match_event.is_set():
+            self.update_match_status("空闲", True)
+            return
+        img_width, img_height = self.img_processor.get_img_size()
+        auto_rect_ids = []  # 记录自动匹配的矩形框id
         for yolo_num in rect_ls:
-            img_width, img_height = self.img_processor.get_img_size()  # 获取当前图像宽高
             label_id, *rect_crood = self.label_processor.yolo_num_to_rect(img_width, img_height, *yolo_num)
-            # 绘制矩形框并保存矩形框的id号
             rect_id = self.create_rectangle(*rect_crood, outline=self.classes_colors[label_id],
                                             width=self.FINISH_RECT_WIDTH)
-            # 将矩形框绑定鼠标事件
             self.tag_bind(rect_id, "<Enter>", lambda e, r_id=rect_id: self.touch_rect(e, r_id))
             self.tag_bind(rect_id, "<Leave>", lambda e, r_id=rect_id: self.leave_rect(e, r_id))
             self.label_processor.record_rect(img_width, img_height,
                                              rect_id, label_id, *rect_crood)
-            # 绘制该矩形框的标签
             self.draw_text(rect_id, label_id, *(rect_crood[:2]), is_auto_rect=True)
+            auto_rect_ids.append(rect_id)
+        # 保存所有自动匹配结果
+        for rect_id in auto_rect_ids:
+            self.label_processor.save_label_file(rect_id, img_width, img_height)
+        self.update_match_status("匹配完成", restore_default=True)
 
     def create_setting_popup(self):
         """创建一个自动辅助匹配的设置窗口"""

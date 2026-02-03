@@ -1,3 +1,4 @@
+import threading
 import time
 
 import numpy as np
@@ -140,54 +141,64 @@ def coarse_match(source, template, step=5):
     return best_similarity, best_location, best_angle  # 返回最佳相似度,最佳位置和最佳旋转角度
 
 
-def coarse_fine_match(source, template, higher_similarity=False, adjust_result=True):
+def coarse_fine_match(source, template, higher_similarity=False, adjust_result=True, match_event=None):
     """
     粗匹配(Coarse Matching)确认旋转角度,确定旋转角度之后再进行精匹配(Fine Registration)
-    source为被匹配的图像,template为模板图像,levels为进行匹配的层数
+    source为被匹配的图像,template为模板图像
+    match_event: 用于取消匹配的Event对象
     """
+    # 如果没有传入Event，创建一个不取消的Event
+    if match_event is None:
+        match_event = threading.Event()
+
+    # 检查是否需要取消
+    if match_event.is_set():
+        return None
+
     # 构建图像金字塔来逐步进行匹配,降低计算复杂度
-    source_pyramid = get_pyramid_till(source, 128, 128)  # 最后一个图像是最小的
-    levels = len(source_pyramid)  # 获取金字塔层数
+    source_pyramid = get_pyramid_till(source, 128, 128)
+    levels = len(source_pyramid)
     template_pyramid = get_pyramid(template, levels)
-    # 先进行粗匹配来确定旋转角度,使用图像金字塔中的最小的图像来进行粗匹配
-    angle_dict = dict()  # 记录每个角度的相似度
-    # 先使用最小的图像对全部角度进行粗匹配
-    for angle in range(0, 361, 5):  # 旋转角度为0到360°,步长为5°
-        # 进行模板匹配
+
+    # 检查是否需要取消
+    if match_event.is_set():
+        return None
+
+    angle_dict = dict()
+    for angle in range(0, 361, 5):
+        # 检查是否需要取消
+        if match_event.is_set():
+            return None
         max_similarity, max_location = match_by_angle(source_pyramid[-1], template_pyramid[-1], angle)
-        angle_dict[angle] = max_similarity  # 记录该角度的最大相似度
-    # 对其他每一层都进行旋转匹配
-    for level in range(levels - 2, -1, -1):  # 遍历金字塔的每一层levels-1, levels-2, ..., 0
-        # 根据上一次记录的最佳角度提取出相似度较大的角度进行旋转匹配
-        angle_num = level + 1  # 计算所取的旋转角度的数量
+        angle_dict[angle] = max_similarity
+
+    for level in range(levels - 2, -1, -1):
+        if match_event.is_set():
+            return None
+        angle_num = level + 1
         better_angle_ls = sorted(angle_dict.keys(), key=lambda x: angle_dict[x], reverse=True)[:angle_num]
-        angle_dict.clear()  # 清空当前层的记录
-        for angle in better_angle_ls:  # 遍历相似度前2.5%的角度
-            # 对每一个角度附近的角度进行匹配
-            for around in range(-5, 6, 1):  # 取周围的角度进行匹配
-                # 每层每次都对周围的角度进行匹配
+        angle_dict.clear()
+        for angle in better_angle_ls:
+            for around in range(-5, 6, 1):
+                if match_event.is_set():
+                    return None
                 around_angle = angle + (around * (0.3 ** ((levels - 1) - level)))
-                # 进行模板匹配
                 max_similarity, max_location = match_by_angle(source_pyramid[-1],
                                                               template_pyramid[-1], angle)
-                angle_dict[around_angle] = max_similarity  # 记录该角度的最大相似度
-        # print(level, angle_dict)
-    # 最后选取出最佳角度进行精确匹配
-    best_angle = max(angle_dict.keys(), key=lambda x: angle_dict[x])  # 获取最佳角度
-    last_similarity = angle_dict[best_angle]  # 取金字塔采样的最大图像的最大相似度做阈值处理,而不使用原图的最大相似度
-    # 再精匹配前使用高斯模糊对模板和原图进行平滑处理,提高匹配效果
+                angle_dict[around_angle] = max_similarity
+
+    if match_event.is_set():
+        return None
+
+    best_angle = max(angle_dict.keys(), key=lambda x: angle_dict[x])
+    last_similarity = angle_dict[best_angle]
     source = cv.GaussianBlur(source, (5, 5), -1)
     template = cv.GaussianBlur(template, (5, 5), -1)
-    # 旋转模板并获取旋转后产生的黑边的掩码
     rotated_template, template_mask = rotate(template, best_angle)
-    # 进行模板匹配,使用掩码来排除黑边
     res = cv.matchTemplate(source, rotated_template, cv.TM_CCOEFF_NORMED, mask=template_mask)
-    _, cur_similarity, _, max_location = cv.minMaxLoc(res)  # 获取该旋转角度的最大相似度
+    _, cur_similarity, _, max_location = cv.minMaxLoc(res)
     print("最佳角度:", best_angle, "最佳相似度:", cur_similarity, "上一层最佳相似度:", last_similarity)
-    # draw_result(source, rotated_template, max_location)
-    # 判断是否需要取较大的相似度
     max_similarity = max(cur_similarity, last_similarity) if higher_similarity else cur_similarity
-    # 判断是否需要调整最终的匹配位置
     x_start, y_start, x_end, y_end = (adjust_rect(source, rotated_template, max_location)
                                       if adjust_result else get_rect(rotated_template, max_location))
     return max_similarity, x_start, y_start, x_end, y_end
@@ -319,96 +330,138 @@ class TemplateManager:
             self.template_dict[label_id].pop(self.last_templ_id_dict[label_id])
             self.last_templ_id_dict[label_id] = None
 
-    def coarse_match_all_classes(self, img_path):
-        """使用所有模板的金字塔的最顶层来粗略匹配一张图片,返回最佳相似度的模板"""
-        img_pil = Image.open(img_path)  # 使用PIL读取图片文件,因为cv无法读取中文路径
-        image = cv.cvtColor(np.array(img_pil), cv.COLOR_RGB2BGR)  # 读取被匹配的图片
-        best_template_dict = dict()  # 记录每一个类别下的最佳模板
-        better_template_dict = dict()  # 记录每一个类别下的第二大的相似度的模板
-        # 遍历全部类别的模板列表
+    def coarse_match_all_classes(self, img_path, match_event=None):
+        """使用所有模板的金字塔的最顶层来粗略匹配一张图片,返回最佳相似度的模板
+        match_event: 用于取消匹配的Event对象
+        """
+        # 如果没有传入Event，创建一个不取消的Event
+        if match_event is None:
+            match_event = threading.Event()
+
+        img_pil = Image.open(img_path)
+        image = cv.cvtColor(np.array(img_pil), cv.COLOR_RGB2BGR)
+        best_template_dict = dict()
+        better_template_dict = dict()
         for label_id, template_ls in self.template_dict.items():
-            best_similarity = -1  # 记录当前类别下的最佳相似度
-            better_similarity = -1  # 记录当前类别下的第二大的相似度
-            # 遍历该类别下的所有模板
+            if match_event.is_set():
+                return None, None
+            best_similarity = -1
+            better_similarity = -1
             for idx, template in enumerate(template_ls):
-                # 使用粗略匹配函数进行粗略匹配,注意template是一个元组,第一个元素是模板对象
+                if match_event.is_set():
+                    return None, None
                 similarity, _, angle = coarse_match(image, template[0])
-                # 如果该模板的相似度大于最佳模板的相似度,则更新最佳模板
                 if similarity > best_similarity:
-                    best_similarity = similarity  # 更新最佳相似度
-                    best_template_dict[label_id] = (idx, angle)  # 更新最佳模板的索引和角度
-                else:  # 如果该模板的相似度小于最佳模板的相似度,就尝试更新第二大的相似度模板
+                    best_similarity = similarity
+                    best_template_dict[label_id] = (idx, angle)
+                else:
                     if similarity > better_similarity:
-                        better_similarity = similarity  # 更新第二大的相似度
-                        better_template_dict[label_id] = (idx, angle)  # 更新第二大相似度模板的索引和角度
+                        better_similarity = similarity
+                        better_template_dict[label_id] = (idx, angle)
         return best_template_dict, better_template_dict
 
-    def match_all_classes(self, img_path=None):
-        """匹配所有类别的模板"""
-        res_ls = []  # 存储匹配结果
-        # 获取需要匹配的图片
+    def match_all_classes(self, img_path=None, match_event=None):
+        """匹配所有类别的模板
+        match_event: 用于取消匹配的Event对象
+        """
+        # 如果没有传入Event，创建一个不取消的Event
+        if match_event is None:
+            match_event = threading.Event()
+
+        res_ls = []
         if img_path is None:
-            img_path = self.image_processor.get_img_path()  # 获取当前图片的路径
-        img_pil = Image.open(img_path)  # 使用PIL读取图片文件,因为cv无法读取中文路径
-        image = cv.cvtColor(np.array(img_pil), cv.COLOR_RGB2BGR)  # 读取被匹配的图片
+            img_path = self.image_processor.get_img_path()
+        img_pil = Image.open(img_path)
+        image = cv.cvtColor(np.array(img_pil), cv.COLOR_RGB2BGR)
         img_height, img_width = image.shape[:2]
         # 使用粗匹配获取最佳模板字典和第二大相似度模板字典
-        best_template_dict, better_template_dict = self.coarse_match_all_classes(img_path)
-        # 遍历已有模板的标签
+        best_template_dict, better_template_dict = self.coarse_match_all_classes(img_path, match_event)
+
+        # 检查是否被取消
+        if best_template_dict is None or match_event.is_set():
+            return []
+
         for label_id in best_template_dict.keys():
-            # 获取最佳模板和第二大模板对象和他们的最佳匹配角度
+            if match_event.is_set():
+                return []
             best_template = best_template_dict.get(label_id, None)
             better_template = better_template_dict.get(label_id, None)
-            # 将最佳匹配模板和第二大匹配模板再次进行匹配对比
-            if better_template is not None:  # 如果第二大模板存在,则最佳模板也一定存在
-                # 获取最佳模板和第二大模板对象,注意best_template和better_template是元组,第一个元素是模板对象的索引
+            # 检查模板列表是否还存在，避免线程安全问题
+            if label_id not in self.template_dict:
+                continue
+            template_ls = self.template_dict[label_id]
+            if better_template is not None:
+                # 检查索引是否有效
+                if best_template[0] >= len(template_ls) or better_template[0] >= len(template_ls):
+                    continue
                 template_best = self.template_dict[label_id][best_template[0]][0]
                 template_better = self.template_dict[label_id][better_template[0]][0]
-                # 获取最佳模板和第二大模板的最佳匹配角度
                 angle_of_best = best_template[1]
                 angle_of_better = better_template[1]
-                # 将两个模板进行匹配对比,使用1次金字塔采样得到的最大匹配相似度
                 similarity_of_best, _ = match_by_angle_and_level(image, template_best,
                                                                  angle_of_best, 1)
                 similarity_of_better, _ = match_by_angle_and_level(image, template_better,
                                                                    angle_of_better, 1)
                 print('best:', similarity_of_best, 'better:', similarity_of_better)
-                # 如果最佳模板的相似度大于第二大模板的相似度,则使用最佳模板进行完整的金字塔匹配,并返回结果
-                best_template_idx = best_template[0]  # 获取最佳模板的索引
+                best_template_idx = best_template[0]
                 better_template_idx = better_template[0]
-                template = template_best  # 默认使用最佳模板进行完整匹配
-                if similarity_of_better > similarity_of_best:  # 第二大模板的相似度大于最佳模板的相似度
-                    template = template_better  # 使用第二大模板进行完整匹配
-                    # 将最佳模板(不用来进行完整匹配)的系数进行衰减,衰弱第二大的模板是想将相似的模板去掉
+                template = template_best
+                if similarity_of_better > similarity_of_best:
+                    template = template_better
                     self.template_dict[label_id][best_template_idx][1] *= self.DECAY_FACTOR
-                    # 记录本次进行匹配的模板的索引
                     self.last_templ_id_dict[label_id] = better_template_idx
-                else:  # 如果第二大模板的相似度小于等于最佳模板的相似度
-                    # 继续使用最佳模板进行完整匹配,然后将第二大模板的系数进行衰减
+                else:
                     self.template_dict[label_id][better_template_idx][1] *= self.DECAY_FACTOR
-                    # 记录本次进行匹配的模板的索引
                     self.last_templ_id_dict[label_id] = best_template_idx
-                # 将选出来的模板进行完整匹配
+
+                # 检查是否被取消
+                if match_event.is_set():
+                    return []
+
+                # 检查模板是否有效
+                if template is None:
+                    continue
+
                 max_similarity, x_start, y_start, x_end, y_end = coarse_fine_match(image, template,
                                                                                    self.higher_similarity,
-                                                                                   self.adjust_result)
+                                                                                   self.adjust_result,
+                                                                                   match_event)
+
+                # 检查是否被取消
+                if max_similarity is None or match_event.is_set():
+                    return []
+
                 self.status_bar.txshow(f'已完成所有模板的匹配,本次匹配的相似度为{max_similarity:3f}', 5)
-                # 判断最大匹配相似度是否满足设定的阈值,满足则将匹配结果返回
-                if max_similarity >= self.threshold:  # 如果匹配成功,则以yolo格式保存到列表中
+                if max_similarity >= self.threshold:
                     res_ls.append(self.label_processor.rect_to_yolo_num(img_width, img_height, label_id,
                                                                         x_start, y_start, x_end, y_end))
-            else: # 如果第二大模板不存在,则使用最佳模板进行完整匹配
-                best_template_idx = best_template[0]  # 获取最佳模板的索引
+            else:
+                best_template_idx = best_template[0]
+                # 检查索引是否有效
+                if best_template_idx >= len(self.template_dict[label_id]):
+                    continue
                 template = self.template_dict[label_id][best_template_idx][0]
-                # 记录本次进行匹配的模板的索引
                 self.last_templ_id_dict[label_id] = best_template_idx
-                # 将选出来的模板进行完整匹配
+
+                # 检查是否被取消
+                if match_event.is_set():
+                    return []
+
+                # 检查模板是否有效
+                if template is None:
+                    continue
+
                 max_similarity, x_start, y_start, x_end, y_end = coarse_fine_match(image, template,
                                                                                    self.higher_similarity,
-                                                                                   self.adjust_result)
+                                                                                   self.adjust_result,
+                                                                                   match_event)
+
+                # 检查是否被取消
+                if max_similarity is None or match_event.is_set():
+                    return []
+
                 self.status_bar.txshow(f'已完成所有模板的匹配,本次匹配的相似度为{max_similarity:3f}', 5)
-                # 判断最大匹配相似度是否满足设定的阈值,满足则将匹配结果返回
-                if max_similarity >= self.threshold:  # 如果匹配成功,则以yolo格式保存到列表中
+                if max_similarity >= self.threshold:
                     res_ls.append(self.label_processor.rect_to_yolo_num(img_width, img_height, label_id,
                                                                         x_start, y_start, x_end, y_end))
         return res_ls
