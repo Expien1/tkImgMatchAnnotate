@@ -1,0 +1,11 @@
+[project]
+name = "tkimgmatchannotate"
+version = "0.1.0"
+description = "基于模板匹配的YOLO图像标注工具，用于验证纯视觉方法在辅助标注中的可行性"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.4.1",
+    "opencv-python>=4.13.0.90",
+    "pillow>=12.1.0",
+]
